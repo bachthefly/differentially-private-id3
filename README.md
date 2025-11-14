@@ -35,11 +35,11 @@ The dataset files (adult.data and adult.names) must be placed in the __data__ fo
 
 2. Library Installation
 
-In addition to native Python libraries, we are using some additional Python libraries, so please make sure that you got the following libraries installed: **pandas**, **numpy**, and **pycanon**
+In addition to native Python libraries, we are using some additional Python libraries, so please make sure that you got the following libraries installed: `pandas` and `numpy`.
 
 You can check if you have them installed or not by typing the following command line into your terminal:
 ```python
-pip install pandas numpy pycanon
+pip install pandas numpy
 ```
 Or you can use the __requirements.txt__ file:
 ```python
@@ -47,18 +47,31 @@ pip install -r requirements.txt
 ```
 If you don't have the mentioned libraries installed, the system will install them for you.
 
-3. Run all of the Notebook Cells
+1. Run all of the Notebook Cells
    
-4. Inspect the Output
+2. Inspect the Output
 Results are printed directly in the notebook. CSV files containing generalized data are saved in the working directory.
 
-## Major Design Decisions
+## Analysis
 
-- **Dynamic Generalization Functions**  
-  Generalization for each quasi-identifier is implemented as a function. For numerical attributes like age, bins are computed dynamically from the dataset’s min/max values, ensuring the method adapts automatically to different datasets. For categorical attributes, hierarchies are encoded in nested levels (e.g., collapsing job categories or education levels).
+1. Generalization level (Binning of age and hours variables)
 
-- **Per-Attribute Multi-Level Control**  
-  Each QID supports multiple generalization levels, with mappings defined explicitly in the code. This allows fine-grained control: one attribute can be generalized heavily (e.g., “Any” country), while another remains at a low level (e.g., detailed marital status).
+The generalization level controls how finely or coarsely numerical attributes (such as age and hours worked per week) are grouped before being passed to the DP-ID3 algorithm. Lower levels (e.g., raw values or 5-year bins) preserve more detail, while higher levels (e.g., broad groups such as $≤25$, $26–40$, $41–60$, $>60$) merge many original values together. From a privacy perspective, stronger generalization increases k-anonymity and reduces the risk of re-identification in the published model, because individual records become harder to distinguish from one another. However, the trade-off is that accuracy decreases as the bins become too coarse: the tree loses the ability to use fine-grained distinctions in the data, causing splits to become less informative and potentially shifting decision boundaries. In terms of efficiency, coarser bins significantly reduce the number of branches that the DP-ID3 tree needs to consider, which lowers the number of DP counting queries and accelerates tree construction. Fewer categories also reduce the cumulative effect of DP noise. Thus, the generalization level directly influences the privacy–utility–efficiency balance: more generalization increases privacy and speed while sacrificing predictive accuracy, whereas finer granularity has the opposite effect.
 
-- **Reverse Mapping for Utility Evaluation**  
-  To evaluate KL-divergence, we built reverse maps. Each generalized value is mapped back to its possible original values, distributing probability mass uniformly. 
+2. Privacy budget (epsilon) in `find_entropy_split`
+
+The privacy budget $\varepsilon$ controls the amount of Laplace noise added to all label and branch counts during the split selection process. A smaller $\varepsilon$ introduces more noise, which strengthens privacy by making it harder to infer the presence or absence of any individual record from the statistics used in the decision tree. However, high noise also corrupts the computed entropy values and may cause the algorithm to select suboptimal splits, thereby reducing model accuracy. Conversely, a larger $\varepsilon$ yields more accurate counts and produces a tree closer to the non-private ID3 baseline, but at the cost of weaker privacy guarantees. From an efficiency standpoint, $\varepsilon$ does not change computational complexity directly, but indirectly affects efficiency through tree behavior: with high noise (small $\varepsilon$), split quality becomes unreliable, causing the algorithm to terminate early, produce shallower trees, or generate fewer meaningful branches. This sometimes speeds up training, but the resulting model may be less useful. Larger $\varepsilon$  improves split stability, often leading to deeper trees and more computation. Overall, $\varepsilon$ represents the central privacy–accuracy trade-off in differential privacy: lower $\varepsilon$  gives stronger privacy but poorer accuracy and more unstable splits; higher $\varepsilon$ improves utility but weakens privacy protection.
+
+Inside the `find_entropy_split` routine, the algorithm issues several noisy counting queries, so we must account for how much privacy budget is consumed inside each call. For each attribute value ($j$), the function first releases a noisy version of the branch size ($|D_{a=j}|$), and then releases a set of noisy class-specific counts ($|D_{a=j, y=i}|$). The class-specific subsets (${D_{a=j, y=i}}*i$) form a partition of ($D*{a=j}$), so by **parallel composition**, all class counts together consume only **$\varepsilon$** (not $\varepsilon$ multiplied by the number of classes). However, the noisy total ($|D_{a=j}|$) is another query on the same records. Therefore, by **sequential composition**, the combined privacy cost of one entropy computation for a single attribute value is:
+
+$
+2\varepsilon_{\text{local}} = \varepsilon_{\text{total-count}} + \varepsilon_{\text{class-counts}}.
+$
+
+Across different attribute values ($j$), the groups (${D_{a=j}}$) form a partition of the dataset by that attribute, so those iterations compose in parallel and do **not** further accumulate privacy loss. To ensure the overall call to `find_entropy_split` remains within a node-level budget ($\varepsilon_{\text{node}}$), we therefore allocate:
+
+$
+\varepsilon_{\text{local}} = \frac{\varepsilon_{\text{node}}}{2 * |Unique Labels|},
+$
+
+so that the total consumption per split evaluation is at most $varepsilon_{\text{node}}$. This also means the cost does **not** grow with the number of class labels, preserving both correctness and tight privacy accounting for the entire DP-ID3 algorithm.
